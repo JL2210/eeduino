@@ -145,6 +145,10 @@ byte readByte(unsigned address) {
   return value;
 }
 
+inline void data_poll(unsigned last_address, byte last_byte) {
+  while((readByte(last_address) ^ last_byte) & 0x80);
+}
+
 void disableSDP() {
   noInterrupts();
   writeByte(0xaa, 0x5555);
@@ -172,7 +176,7 @@ void erase() {
 
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   write_ctrl<CE, HIGH>();
   write_ctrl<OE, HIGH>();
@@ -191,39 +195,62 @@ if(0) {
   erase();
 }
 
-  unsigned char byte_to_write = 0xff;
-  unsigned address = 0x0000;
-if(0) {
+  randomSeed(0x73);
+
+  byte rdata[64];
+  for(int i = 0; i < 64; i++) {
+    rdata[i] = random(0x100);
+  }
+
+#if 1
+  unsigned long start_time = micros();
+
   io_data<OUTPUT>();
   // write
   noInterrupts();
-  writeByte(byte_to_write, address);
-}
+  unsigned write_addr;
+  for(write_addr = 0; write_addr < 64; write_addr++) {
+    writeByte(rdata[write_addr], write_addr);
+  }
+  write_addr--;
+#endif
 
-if(0) {
-  delay(10); // wait 10 ms for write cycle to complete
-  interrupts();
-} else if(0) {
   // /DATA poll
-
+#if 0
   io_data<INPUT>();
   set_data(0); // clear pullups
 
-  while((readByte(address) ^ byte_to_write) & 0x80) {}
+  data_poll(write_addr, rdata[write_addr]);
   interrupts();
-}
+  unsigned long time_taken = micros() - start_time;
+#else
+  int time_taken = 0;
+#endif
 
-if(1) {
+#if 1
   // read
   io_data<INPUT>();
   set_data(0); // clear pullups
-  for(int addr = 1; addr < 2; addr++) {
+  bool error = false;
+  for(int read_addr = 0; read_addr < 64; read_addr++) {
     noInterrupts();
-    byte value = readByte(addr);
+    byte read_value = readByte(read_addr);
     interrupts();
-    Serial.println(value, HEX);
+    byte written_value = rdata[read_addr];
+    Serial.print(F("value: "));
+    Serial.println(written_value, HEX);
+    if(read_value != written_value) {
+      error = true;
+      Serial.print(F("ERR! "));
+      Serial.println(read_value, HEX);
+    }
   }
-}
+  Serial.print(F("time taken: "));
+  Serial.print(time_taken, DEC);
+  Serial.println(F(" microseconds"));
+  Serial.print(F("had error? "));
+  Serial.println(error ? F("yes") : F("no"));
+#endif
   Serial.println(F("Done!"));
 }
 
