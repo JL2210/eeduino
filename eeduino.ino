@@ -57,7 +57,6 @@ inline void set_addr(unsigned addr) {
       digitalWrite(pin, addr & 1);
       addr >>= 1;
     }
-    // consistent behavior
     for(int pin = ADDR8; pin >= /* ADDR14 */ UNUSED; pin--) {
       digitalWrite(pin, addr & 1);
       addr >>= 1;
@@ -150,8 +149,10 @@ inline void data_poll(unsigned last_address, byte last_byte) {
 }
 
 void disable_SDP() {
+  io_data<INPUT>();
   noInterrupts();
   byte old = read_byte(0x0000);
+  io_data<OUTPUT>();
   write_byte(0xaa, 0x5555);
   write_byte(0x55, 0x2aaa);
   write_byte(0x80, 0x5555);
@@ -159,11 +160,25 @@ void disable_SDP() {
   write_byte(0x55, 0x2aaa);
   write_byte(0x20, 0x5555);
   write_byte(old, 0x0000); // dummy write to flush command
-  delay(10);
   interrupts();
+  delay(10);
+}
+
+void enable_SDP() {
+  io_data<INPUT>();
+  noInterrupts();
+  byte old = read_byte(0x0000);
+  io_data<OUTPUT>();
+  write_byte(0xaa, 0x5555);
+  write_byte(0x55, 0x2aaa);
+  write_byte(0xa0, 0x5555);
+  write_byte(old, 0x0000); // dummy write to flush command
+  interrupts();
+  delay(10);
 }
 
 void erase() {
+  io_data<OUTPUT>();
   noInterrupts();
   write_byte(0xaa, 0x5555);
   write_byte(0x55, 0x2aaa);
@@ -171,31 +186,32 @@ void erase() {
   write_byte(0xaa, 0x5555);
   write_byte(0x55, 0x2aaa);
   write_byte(0x10, 0x5555);
-  delay(20);
   interrupts();
+  delay(20);
 }
 
-#define LOG2_PAGESIZE 6
-#define PAGESIZE (1 << LOG2_PAGESIZE)
+#define PAGESIZE 64
 byte pagebuf[PAGESIZE] = {};
 #define NPAGES 512
+#define EEPROM_SIZE PAGESIZE * NPAGES
 
-// reads pages [0,n) from the eeprom
+// reads pages [0,n] from the eeprom
 void eeprom_readout(unsigned pages) {
   io_data<INPUT>();
-  for(unsigned i = 0; i < pages; i++) {
+  for(unsigned i = 0; i <= pages; i++) {
     noInterrupts();
     for(unsigned n = 0; n < PAGESIZE; n++) {
-      pagebuf[n] = read_byte(i << LOG2_PAGESIZE | n);
+      pagebuf[n] = read_byte((i * PAGESIZE) + n);
     }
     interrupts();
     Serial.write(pagebuf, PAGESIZE);
+    Serial.flush();
   }
 }
 
-// writes pages [0,n) to the eeprom
+// writes pages [0,n] to the eeprom
 void eeprom_write(unsigned pages) {
-  for(unsigned i = 0; i < pages; i++) {
+  for(unsigned i = 0; i <= pages; i++) {
     while(Serial.available() < PAGESIZE) {
     }
     Serial.readBytes(pagebuf, PAGESIZE);
@@ -203,11 +219,11 @@ void eeprom_write(unsigned pages) {
     unsigned n;
     io_data<OUTPUT>();
     for(n = 0; n < PAGESIZE; n++) {
-      write_byte(pagebuf[n], i << LOG2_PAGESIZE | n);
+      write_byte(pagebuf[n], (i * PAGESIZE) + n);
     }
     n--;
     io_data<INPUT>();
-    data_poll(i << LOG2_PAGESIZE | n, pagebuf[n]);
+    data_poll((i * PAGESIZE) + n, pagebuf[n]);
     interrupts();
   }
 }
@@ -223,39 +239,31 @@ void setup() {
   delay(5); // power-on delay
 
   Serial.begin(115200);
+}
 
+void loop() {
   while(Serial.available() < 1) {
   }
 
-  char command = Serial.read();
+  byte command = Serial.read();
   switch(command) {
     case 'e': {
-      io_data<OUTPUT>();
       erase();
       break;
     }
     case 's': {
-      io_data<OUTPUT>();
       disable_SDP();
       break;
     }
-    /* hell no
     case 'S': {
-      io_data<OUTPUT>();
       enable_SDP();
       break;
-    } */
+    }
     case 'r': case 'w': {
-      unsigned pages = 0;
       while(Serial.available() < 2) {
       }
-      pages = Serial.read();
-      pages |= Serial.read() << 8;
-      if(pages > NPAGES || pages == 0) {
-        Serial.println(pages > NPAGES ? F("number of pages exceeds number of pages on EEPROM")
-                                      : F("number of pages is zero"));
-        while(true);
-      }
+      unsigned pages = Serial.read() & ((NPAGES - 1) & 0xff);
+      pages |= (Serial.read() & ((NPAGES - 1) >> 8)) << 8;
       if(command == 'r') {
         eeprom_readout(pages);
       } else if(command == 'w') {
@@ -264,21 +272,27 @@ void setup() {
       break;
     }
     case 'd': { // dump whole eeprom
-      eeprom_readout(NPAGES);
+      eeprom_readout(NPAGES - 1);
       break;
     }
     case 'f': { // flash whole EEPROM
-      eeprom_write(NPAGES);
+      eeprom_write(NPAGES - 1);
+      break;
+    }
+    case 0xee: { // polling byte, echo back
+      Serial.write(0xee);
+      Serial.flush();
       break;
     }
     default: {
-      Serial.print(F("Invalid command '"));
-      Serial.print(command);
-      Serial.println(F("'"));
+      while(true) {
+        pinMode(13, OUTPUT);
+        digitalWrite(13, HIGH);
+        delay(1000);
+        digitalWrite(13, LOW);
+        delay(100);
+      }
       break;
     }
   }
-}
-
-void loop() {
 }
