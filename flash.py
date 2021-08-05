@@ -1,23 +1,22 @@
 import argparse
 import serial
-import time
+from time import sleep
+import os
 
-npages = 512
+eeprom_pages = 512
 page_size = 64 # bytes
-eeprom_size = npages * page_size
+eeprom_size = eeprom_pages * page_size
 
 def echo_poll():
-	arduino.write(bytes([0xee]))
-	arduino.flush()
+	written = arduino.write(bytes([0xee]))
+	if (written != 1):
+		raise RuntimeError("unable to write echo byte")
 	echo = arduino.read()
-	print(echo)
 	if (echo[0] != 0xee):
-		raise RuntimeError("did not recieve correct echo byte")
-	print("read")
+		raise RuntimeError(f"did not recieve correct echo byte ({echo[0]:2x} instead of ee)")
 
 def erase(args):
 	arduino.write(b'e')
-	arduino.flush()
 	echo_poll()
 
 def sdp(args):
@@ -27,59 +26,36 @@ def sdp(args):
 		arduino.write(b'S')
 	else: # something else?
 		raise ValueError("unknown SDP state argument")
-	arduino.flush()
-	echo_poll()
-
-def read(args):
-	if (args.N > npages) or (args.N <= 0):
-		raise ValueError(f"number of pages to write must be between 1 and {npages} inclusive")
-	n = args.N - 1
-	arduino.write(b'r')
-	arduino.write(bytes(n & 0xff))
-	arduino.write(bytes(n >> 8))
-	arduino.flush()
-	while n >= 0:
-		written = args.file.write(arduino.read(page_size))
-		if(written != page_size):
-			raise RuntimeError("amount of bytes written to file not equal to page size")
-		n -= 1
-	echo_poll()
-
-def write(args):
-	if (args.N > npages) or (args.N <= 0):
-		raise ValueError(f"number of pages to read must be between 1 and {npages} inclusive")
-	n = args.N - 1
-	arduino.write(b'w')
-	arduino.write(n & 0xff)
-	arduino.write(n >> 8)
-	while n >= 0:
-		read = arduino.write(args.file.read(page_size))
-		if(read != page_size):
-			raise RuntimeError("amount of bytes read from file not equal to page size")
-		n -= 1
 	echo_poll()
 
 def dump(args):
-	n = npages - 1
 	arduino.write(b'd')
-	arduino.flush()
-	while n >= 0:
+	for _ in range(0, eeprom_pages):
 		data = arduino.read(page_size)
+		if (len(data) != page_size):
+			raise RuntimeError(f"received {len(data)} bytes instead of {page_size}")
 		written = args.file.write(data)
 		if(written != page_size):
-			raise RuntimeError("amount of bytes written to file not equal to page size")
-		n -= 1
+			raise RuntimeError(f"amount of bytes written to file ({written}) not equal to page size ({page_size})")
 	echo_poll()
 
 def flash(args):
-	n = npages - 1
 	arduino.write(b'f')
-	arduino.flush()
-	while n >= 0:
-		read = arduino.write(args.file.read(page_size))
-		if(read != page_size):
-			raise RuntimeError("amount of bytes read from file not equal to page size")
-		n -= 1
+	size = os.stat(args.file.name).st_size
+	if (size != eeprom_size):
+		raise RuntimeError(f"file size ({size}) does not match EEPROM size ({eeprom_size})")
+	for n in range(0, eeprom_pages):
+		page = args.file.read(page_size)
+		if (len(page) != page_size):
+			raise RuntimeError(f"read {len(data)} bytes from file instead of {page_size}")
+		ready = arduino.read()
+		if(len(ready) != 1):
+			raise RuntimeError("did not receive ready byte")
+		if(ready[0] != 0xaa):
+			raise RuntimeError(f"incorrect ready byte: expected aa, received {ready[0]:2x}")
+		sent = arduino.write(page)
+		if(sent != page_size):
+			raise RuntimeError(f"amount of bytes sent ({read}) not equal to page size ({page_size})")
 	echo_poll()
 
 parser = argparse.ArgumentParser(description="Flash, erase, or modify the software data protection state of an EEPROM")
@@ -95,16 +71,6 @@ parser_sdp = subparsers.add_parser("sdp", help="enable/disable software data pro
 parser_sdp.add_argument("state", choices=["disable", "enable"])
 parser_sdp.set_defaults(func=sdp)
 
-parser_read = subparsers.add_parser("read", help="read N pages from EEPROM into file")
-parser_read.add_argument("file", type=argparse.FileType("wb", 0), help="file to store the data in")
-parser_read.add_argument("N", type=int, help="number of pages")
-parser_read.set_defaults(func=read)
-
-parser_write = subparsers.add_parser("write", help="write N pages from file to EEPROM")
-parser_write.add_argument("file", type=argparse.FileType("rb", 0), help="file to read the data from")
-parser_write.add_argument("N", type=int, help="number of pages")
-parser_write.set_defaults(func=write)
-
 parser_dump = subparsers.add_parser("dump", help="dump contents of EEPROM to a file")
 parser_dump.add_argument("file", type=argparse.FileType("wb", 0), help="file to store the data in")
 parser_dump.set_defaults(func=dump)
@@ -117,7 +83,10 @@ args = parser.parse_args()
 
 arduino = serial.Serial(port=args.port, baudrate=args.baud_rate, timeout=None)
 
-# give time for the arduino to reboot?
-time.sleep(10)
+ready = arduino.read()
+if(len(ready) != 1):
+	raise RuntimeError("did not receive ready byte")
+if(ready[0] != 0xab):
+	raise RuntimeError(f"incorrect ready byte {ready[0]:2x}, expected ab")
 
 args.func(args)

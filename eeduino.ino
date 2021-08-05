@@ -1,123 +1,60 @@
-// PG0-PG2
-enum ctrl_pin {
-  WE = 41,
-  OE = 40,
-  CE = 39,
-};
-#define WE_BIT 0
-#define OE_BIT 1
-#define CE_BIT 2
+// 41-39 PG0-PG2
+#define WE 0 // 41
+#define OE 1 // 40
+#define CE 2 // 39
 
-#define IO0 49 // PL0-PL7
-#define IO7 42
+// 49-42 PL0-PL7
+// 49-42 IO0-IO7
 
-#define ADDR0 22 // 22-29 PA0-PA7
-#define ADDR7 29
+// 22-29 PA0-PA7
 // 22-29 ADDR0-ADDR7
-#define UNUSED 30
 // pin 30 unused
-#define ADDR8 37
-#define ADDR14 31 // 37-31 PC0-PC6
-// 37-31 = ADDR8-ADDR14
-
-#define USE_PORT_MANIP true
+// 37-31 PC0-PC6
+// 37-31 ADDR8-ADDR14
 
 static_assert(F_CPU == 16000000, "clock speed must be 16mhz!");
 
 inline void set_data(byte data) {
-  if(USE_PORT_MANIP) {
-    PORTL = data;
-  } else {
-    for(int pin = IO0; pin >= IO7; pin--) {
-      digitalWrite(pin, data & 1);
-      data >>= 1;
-    }
-  }
+  PORTL = data;
 }
 
 inline byte get_data() {
-  if(USE_PORT_MANIP) {
-    return PINL;
-  } else {
-    byte result;
-    for(int pin = IO0; pin >= IO7; pin--) {
-      result |= digitalRead(pin);
-      result <<= 1;
-    }
-    return result;
-  }
+  return PINL;
 }
 
 inline void set_addr(unsigned addr) {
-  if(USE_PORT_MANIP) {
-    PORTA = addr & 0xff;
-    PORTC = addr >> 8;
-  } else {
-    for(int pin = ADDR0; pin <= ADDR7; pin++) {
-      digitalWrite(pin, addr & 1);
-      addr >>= 1;
-    }
-    for(int pin = ADDR8; pin >= /* ADDR14 */ UNUSED; pin--) {
-      digitalWrite(pin, addr & 1);
-      addr >>= 1;
-    }
-  }
+  PORTA = addr & 0xff;
+  PORTC = addr >> 8;
 }
 
 template<bool mode>
 inline void io_data() {
-  if(USE_PORT_MANIP) {
-    if(mode == OUTPUT) {
-      DDRL = B11111111;
-    } else {
-      DDRL = B00000000;
-    }
-  } else {
-    for(int pin = IO0; pin >= IO7; pin--) {
-      pinMode(pin, mode);
-    }
+  if(mode == OUTPUT) {
+    DDRL = B11111111;
+  } else if(mode == INPUT) {
+    DDRL = B00000000;
   }
 }
 
 // the address is never anything but output
 inline void io_out_addr() {
-  if(USE_PORT_MANIP) {
-    DDRA = B11111111;
-    DDRC |= B01111111;
-  } else {
-    for(int pin = ADDR0; pin <= ADDR7; pin++) {
-      pinMode(pin, OUTPUT);
-    }
-    for(int pin = ADDR8; pin >= ADDR14; pin--) {
-      pinMode(pin, OUTPUT);
-    }
-  }
+  DDRA = B11111111;
+  DDRC |= B01111111;
 }
 
 // same with control lines
 inline void io_out_ctrl() {
-  if(USE_PORT_MANIP) {
-    DDRG |= B00000111;
-  } else {
-    pinMode(CE, OUTPUT);
-    pinMode(OE, OUTPUT);
-    pinMode(WE, OUTPUT);
-  }
+  DDRG |= B00000111;
 }
 
-template<enum ctrl_pin pin, bool level>
+template<int pin, bool level>
 inline void write_ctrl() {
   static_assert(pin == CE || pin == OE || pin == WE,
                 "invalid control pin");
-  if(USE_PORT_MANIP) {
-    int n = -(pin - WE);
-    if(level) {
-      PORTG |= (1 << n);
-    } else {
-      PORTG &= ~(1 << n);
-    }
+  if(level) {
+    PORTG |= (1 << pin);
   } else {
-    digitalWrite(pin, level);
+    PORTG &= ~(1 << pin);
   }
 }
 
@@ -130,7 +67,7 @@ void write_byte(byte data, unsigned address) {
   // probably not needed
   write_ctrl<WE, HIGH>();
   write_ctrl<CE, HIGH>();
-  _NOP(); // wait 62.5 ns, write pulse high width
+  //_NOP(); // wait 62.5 ns, write pulse high width
 }
 
 byte read_byte(unsigned address) {
@@ -145,7 +82,7 @@ byte read_byte(unsigned address) {
 }
 
 inline void data_poll(unsigned last_address, byte last_byte) {
-  while((read_byte(last_address) ^ last_byte) & 0x80);
+  while((read_byte(last_address) ^ last_byte) & 0x80) {}
 }
 
 void disable_SDP() {
@@ -195,41 +132,44 @@ byte pagebuf[PAGESIZE] = {};
 #define NPAGES 512
 #define EEPROM_SIZE PAGESIZE * NPAGES
 
-// reads pages [0,n] from the eeprom
-void eeprom_readout(unsigned pages) {
+// reads all pages the eeprom
+void eeprom_dump() {
   io_data<INPUT>();
-  for(unsigned i = 0; i <= pages; i++) {
-    noInterrupts();
+  for(unsigned page = 0; page < NPAGES; page++) {
     for(unsigned n = 0; n < PAGESIZE; n++) {
-      pagebuf[n] = read_byte((i * PAGESIZE) + n);
+      pagebuf[n] = read_byte((page * PAGESIZE) + n);
     }
-    interrupts();
     Serial.write(pagebuf, PAGESIZE);
     Serial.flush();
   }
 }
 
-// writes pages [0,n] to the eeprom
-void eeprom_write(unsigned pages) {
-  for(unsigned i = 0; i <= pages; i++) {
-    while(Serial.available() < PAGESIZE) {
+// writes all pages to the eeprom
+void eeprom_flash() {
+  for(unsigned page = 0; page < NPAGES; page++) {
+    Serial.write(0xaa);
+    Serial.flush();
+    int nread = Serial.readBytes(pagebuf, PAGESIZE);
+    if(nread == 0) {
+      pinMode(13, OUTPUT);
+      while(true){digitalWrite(13, HIGH);delay(100);digitalWrite(13,LOW);delay(100);}
     }
-    Serial.readBytes(pagebuf, PAGESIZE);
     noInterrupts();
-    unsigned n;
     io_data<OUTPUT>();
-    for(n = 0; n < PAGESIZE; n++) {
-      write_byte(pagebuf[n], (i * PAGESIZE) + n);
+    for(unsigned n = 0; n < PAGESIZE; n++) {
+      write_byte(pagebuf[n], (page * PAGESIZE) + n);
     }
-    n--;
-    io_data<INPUT>();
-    data_poll((i * PAGESIZE) + n, pagebuf[n]);
     interrupts();
+    unsigned last = PAGESIZE - 1;
+    io_data<INPUT>();
+    data_poll((page * PAGESIZE) + last, pagebuf[last]);
   }
 }
 
 void setup() {
   // put your setup code here, to run once:
+  Serial.begin(115200);
+
   write_ctrl<CE, HIGH>();
   write_ctrl<OE, HIGH>();
   write_ctrl<WE, HIGH>();
@@ -237,8 +177,8 @@ void setup() {
   io_out_addr();
   io_out_ctrl();
   delay(5); // power-on delay
-
-  Serial.begin(115200);
+  Serial.write(0xab);
+  Serial.flush();
 }
 
 void loop() {
@@ -247,43 +187,25 @@ void loop() {
 
   byte command = Serial.read();
   switch(command) {
-    case 'e': {
+    case 'e':
       erase();
       break;
-    }
-    case 's': {
+    case 's':
       disable_SDP();
       break;
-    }
-    case 'S': {
+    case 'S':
       enable_SDP();
       break;
-    }
-    case 'r': case 'w': {
-      while(Serial.available() < 2) {
-      }
-      unsigned pages = Serial.read() & ((NPAGES - 1) & 0xff);
-      pages |= (Serial.read() & ((NPAGES - 1) >> 8)) << 8;
-      if(command == 'r') {
-        eeprom_readout(pages);
-      } else if(command == 'w') {
-        eeprom_write(pages);
-      }
+    case 'd': // dump whole eeprom
+      eeprom_dump();
       break;
-    }
-    case 'd': { // dump whole eeprom
-      eeprom_readout(NPAGES - 1);
+    case 'f': // flash whole EEPROM
+      eeprom_flash();
       break;
-    }
-    case 'f': { // flash whole EEPROM
-      eeprom_write(NPAGES - 1);
-      break;
-    }
-    case 0xee: { // polling byte, echo back
+    case 0xee: // polling byte, echo back
       Serial.write(0xee);
       Serial.flush();
       break;
-    }
     default: {
       while(true) {
         pinMode(13, OUTPUT);
